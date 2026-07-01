@@ -1,0 +1,175 @@
+PatchCore 项目运行环境配置要求
+================================
+
+1. 基础环境
+-----------
+推荐操作系统：
+- Windows 10/11、Linux 均可运行。
+- 本项目当前包含 Windows 测试脚本，路径示例中也有 Windows 绝对路径。
+
+推荐 Python：
+- 原始 README 中说明实验使用 Python 3.8。
+- 当前 requirements.txt 使用 numpy>=2.0,<2.3，建议使用 Python 3.10 或 3.11 创建虚拟环境。
+- 如果使用 Python 3.12，需要确保 torch、torchvision、faiss-cpu、timm 等依赖都有可用版本。
+
+推荐硬件：
+- 建议使用 NVIDIA GPU 运行训练和评估。
+- 大多数实验显存需求不超过 11GB，但更大的输入分辨率会显著增加显存占用。
+- 如果没有 GPU，也可以使用 CPU 运行，但速度会明显变慢，并且命令中不要使用 --faiss_on_gpu。
+
+
+2. 创建虚拟环境
+---------------
+在项目根目录执行：
+
+Windows PowerShell:
+    python -m venv .venv
+    .\.venv\Scripts\Activate.ps1
+    python -m pip install --upgrade pip
+
+Linux / macOS:
+    python3 -m venv .venv
+    source .venv/bin/activate
+    python -m pip install --upgrade pip
+
+
+3. 安装 PyTorch
+---------------
+请根据本机 CUDA 版本安装对应的 torch 和 torchvision。
+
+如果使用 GPU，请到 PyTorch 官方安装页面选择匹配命令：
+    https://pytorch.org/get-started/locally/
+
+示例（仅作参考，实际以本机 CUDA 版本为准）：
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+如果只使用 CPU：
+    pip install torch torchvision
+
+
+4. 安装项目依赖
+---------------
+在虚拟环境中执行：
+
+    pip install -r requirements.txt
+
+requirements.txt 中主要依赖包括：
+- click
+- faiss-cpu
+- matplotlib
+- numpy>=2.0,<2.3
+- pillow
+- pretrainedmodels
+- torch
+- torchvision
+- scikit-image
+- scikit-learn
+- scipy
+- timm
+- tqdm
+
+如果需要运行测试、格式化或开发检查，再安装开发依赖：
+
+    pip install -r requirements_dev.txt
+
+开发依赖包括：
+- black
+- flake8
+- isort
+- pytest
+
+
+5. 安装项目包或设置 PYTHONPATH
+------------------------------
+二选一即可。
+
+方式 A：推荐，开发模式安装：
+    pip install -e .
+
+方式 B：临时设置 PYTHONPATH：
+    $env:PYTHONPATH="src"      （Windows PowerShell）
+    export PYTHONPATH=src      （Linux / macOS）
+
+README 中示例也可使用：
+    env PYTHONPATH=src python bin/run_patchcore.py
+
+
+6. 数据集要求
+-------------
+默认支持 MVTec AD 格式的数据集。典型目录结构如下：
+
+mvtec/
+  bottle/
+    train/
+      good/
+    test/
+      good/
+      defect_type_1/
+      defect_type_2/
+    ground_truth/
+  cable/
+  capsule/
+  ...
+
+MVTec AD 官方数据集下载地址：
+    https://www.mvtec.com/company/research/datasets/mvtec-ad
+
+本项目也包含 visa、btad、mvtec_loco 等数据集加载代码。
+
+如果使用自定义数据集，建议整理成 MVTec 风格：
+    class_name/train/good
+    class_name/test/good
+    class_name/test/defect
+
+项目中的脚本 scripts/convert_srs_to_patchcore.py 可用于将 SRS 数据转换为 PatchCore/MVTec 风格。
+
+
+7. 运行训练
+-----------
+主要训练入口：
+    python bin/run_patchcore.py
+
+示例脚本：
+    sample_training.sh
+
+Windows 本地测试脚本：
+    python scripts/test_patchcore_full_shot_windows.py
+    python scripts/test_patchcore_few_shot_windows.py
+
+注意：
+- 脚本中的 datapath 需要改成你本机真实数据集路径。
+- 如果没有 GPU，删除命令中的 --faiss_on_gpu，并将 --gpu 参数按实际情况调整。
+- 如果不需要 Weights & Biases 在线日志，可以去掉 --log_online。
+
+
+8. 运行已训练模型评估
+--------------------
+主要评估入口：
+    python bin/load_and_evaluate_patchcore.py
+
+示例脚本：
+    sample_evaluation.sh
+
+需要准备：
+- 已训练好的 PatchCore 模型目录。
+- 与模型类别对应的数据集路径。
+- 正确设置 loadpath、modelfolder、savefolder、datapath。
+
+
+9. 运行测试
+-----------
+安装开发依赖后可执行：
+
+    $env:PYTHONPATH="src"; python -m pytest -v      （Windows PowerShell）
+    PYTHONPATH=src python -m pytest -v              （Linux / macOS）
+
+
+10. 常见注意事项
+----------------
+- faiss-cpu 已在 requirements.txt 中启用；faiss-gpu 被注释。如果需要 GPU 版 FAISS，需要根据 CUDA 环境单独安装。
+- torch 和 torchvision 的版本必须互相兼容。
+- 第一次运行会下载 ImageNet 预训练 backbone 权重，需要联网或提前准备缓存。
+- 输入分辨率越大，显存占用越高；640x640 比 224x224 更容易占满显存。
+- output/ 目录通常用于保存结果，模型保存目录由运行命令中的结果路径和日志参数决定。
+- Windows 下运行 .sh 脚本需要 Git Bash、WSL 或手动改写成 PowerShell 命令。
+
