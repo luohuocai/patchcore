@@ -1,0 +1,5 @@
+.idea/
+__pycache__/
+LabletAnomaly.egg-info/
+.pytest_cache/
+*.pyc
