@@ -1,13 +1,39 @@
 PatchCore 一键配置环境说明
 ==========================
 
-注意：Windows 不能直接运行 .txt 文件，所以真正用于一键配置的是同目录下的：
+注意：.txt 文件只是说明，真正用于一键配置的是同目录下的脚本。
+
+Windows 使用：
 
     setup_environment.bat
+
+Linux / Ubuntu 使用：
+
+    setup_environment.sh
+
+
+Windows 运行方式
+----------------
 
 双击 setup_environment.bat，或者在 PowerShell / CMD 中执行：
 
     .\setup_environment.bat
+
+
+Linux / Ubuntu 运行方式
+-----------------------
+
+进入项目目录后执行：
+
+    bash setup_environment.sh
+
+如果要指定 CUDA 11.8：
+
+    bash setup_environment.sh cu118
+
+如果只需要 CPU 环境：
+
+    bash setup_environment.sh cpu
 
 该脚本会自动完成：
 
@@ -95,4 +121,3 @@ PatchCore 一键配置环境说明
 3. 如果 PowerShell 不允许运行脚本：
 
    本项目的一键脚本是 .bat 文件，双击或在 CMD 中运行即可，不需要修改 PowerShell 执行策略。
-
