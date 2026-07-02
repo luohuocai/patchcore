@@ -12,6 +12,87 @@ import tqdm
 LOGGER = logging.getLogger(__name__)
 
 
+def _as_numpy(value):
+    if isinstance(value, np.ndarray):
+        return value
+    if hasattr(value, "detach"):
+        return value.detach().cpu().numpy()
+    if hasattr(value, "numpy"):
+        return value.numpy()
+    return np.asarray(value)
+
+
+def _to_display_image(image):
+    image = _as_numpy(image)
+    image = np.squeeze(image)
+    if image.ndim == 3 and image.shape[0] in (1, 3):
+        image = image.transpose(1, 2, 0)
+    if image.ndim == 3 and image.shape[-1] == 1:
+        image = image[:, :, 0]
+    return image
+
+
+def _to_score_map(segmentation):
+    segmentation = np.asarray(segmentation)
+    segmentation = np.squeeze(segmentation)
+    if segmentation.ndim == 2:
+        return segmentation
+    if segmentation.ndim == 3 and segmentation.shape[0] in (1, 3):
+        return np.max(segmentation, axis=0)
+    if segmentation.ndim == 3 and segmentation.shape[-1] in (1, 3):
+        return np.max(segmentation, axis=-1)
+    raise ValueError("Expected a 2D anomaly score map.")
+
+
+def _thresholded_anomaly_mask(score_map, threshold):
+    return _to_score_map(score_map) >= threshold
+
+
+def _padded_contour_grid(binary_mask):
+    height, width = binary_mask.shape
+    padded_mask = np.pad(binary_mask.astype(np.float32), 1, constant_values=0.0)
+    x_coords = np.arange(-1, width + 1)
+    y_coords = np.arange(-1, height + 1)
+    return x_coords, y_coords, padded_mask
+
+
+def _compute_anomaly_contours(score_map, threshold):
+    binary_mask = _thresholded_anomaly_mask(score_map, threshold)
+    if not np.any(binary_mask):
+        return []
+
+    height, width = binary_mask.shape
+    x_coords, y_coords, padded_mask = _padded_contour_grid(binary_mask)
+    figure, axis = plt.subplots()
+    contour_set = axis.contour(x_coords, y_coords, padded_mask, levels=[0.5])
+    contours = []
+    for segment in contour_set.allsegs[0]:
+        contour = np.stack([segment[:, 1], segment[:, 0]], axis=1)
+        contour[:, 0] = np.clip(contour[:, 0], 0, height - 1)
+        contour[:, 1] = np.clip(contour[:, 1], 0, width - 1)
+        contours.append(contour)
+    plt.close(figure)
+    return contours
+
+
+def _draw_anomaly_contours(axis, score_map, threshold, color="red", linewidth=1.2):
+    score_map = _to_score_map(score_map)
+    height, width = score_map.shape
+    binary_mask = _thresholded_anomaly_mask(score_map, threshold)
+    if np.any(binary_mask):
+        x_coords, y_coords, padded_mask = _padded_contour_grid(binary_mask)
+        axis.contour(
+            x_coords,
+            y_coords,
+            padded_mask,
+            levels=[0.5],
+            colors=[color],
+            linewidths=linewidth,
+        )
+    axis.set_xlim(-0.5, width - 0.5)
+    axis.set_ylim(height - 0.5, -0.5)
+
+
 def plot_segmentation_images(
     savefolder,
     image_paths,
@@ -20,6 +101,7 @@ def plot_segmentation_images(
     mask_paths=None,
     image_transform=lambda x: x,
     mask_transform=lambda x: x,
+    anomaly_score_threshold=None,
     save_depth=4,
 ):
     """Generate anomaly segmentation images.
@@ -31,6 +113,8 @@ def plot_segmentation_images(
         mask_paths: [List[str]] List of paths to ground truth masks.
         image_transform: [function or lambda] Optional transformation of images.
         mask_transform: [function or lambda] Optional transformation of masks.
+        anomaly_score_threshold: [float or None] Optional threshold used to draw
+            anomaly contours on the response map and input image.
         save_depth: [int] Number of path-strings to use for image savenames.
     """
     if mask_paths is None:
@@ -49,27 +133,59 @@ def plot_segmentation_images(
     ):
         image = PIL.Image.open(image_path).convert("RGB")
         image = image_transform(image)
-        if not isinstance(image, np.ndarray):
-            image = image.numpy()
+        image = _to_display_image(image)
 
         if masks_provided:
             if mask_path is not None:
                 mask = PIL.Image.open(mask_path).convert("RGB")
                 mask = mask_transform(mask)
-                if not isinstance(mask, np.ndarray):
-                    mask = mask.numpy()
+                mask = _to_display_image(mask)
             else:
-                mask = np.zeros_like(image)
+                mask = np.zeros(image.shape[:2], dtype=np.uint8)
+
+        segmentation = _to_score_map(segmentation)
 
         savename = os.path.normpath(image_path).split(os.sep)
         savename = "_".join(savename[-save_depth:])
         savename = os.path.splitext(savename)[0] + ".png"
         savename = os.path.join(savefolder, savename)
-        f, axes = plt.subplots(1, 2 + int(masks_provided))
-        axes[0].imshow(image.transpose(1, 2, 0))
-        axes[1].imshow(mask.transpose(1, 2, 0))
-        axes[2].imshow(segmentation)
-        f.set_size_inches(3 * (2 + int(masks_provided)), 3)
+        plot_count = 2 + int(masks_provided) + int(anomaly_score_threshold is not None)
+        f, axes = plt.subplots(1, plot_count)
+        axes = np.asarray(axes).reshape(-1)
+
+        axis_idx = 0
+        axes[axis_idx].imshow(image)
+        axes[axis_idx].set_title("Image")
+        axis_idx += 1
+
+        if masks_provided:
+            axes[axis_idx].imshow(mask, cmap="gray")
+            axes[axis_idx].set_title("Ground Truth")
+            axis_idx += 1
+
+        axes[axis_idx].imshow(segmentation, cmap="jet", vmin=0.0, vmax=1.0)
+        axes[axis_idx].set_title("Anomaly Response")
+        if anomaly_score_threshold is not None:
+            _draw_anomaly_contours(
+                axes[axis_idx],
+                segmentation,
+                anomaly_score_threshold,
+            )
+        axis_idx += 1
+
+        if anomaly_score_threshold is not None:
+            axes[axis_idx].imshow(image)
+            axes[axis_idx].set_title("Anomaly Contour")
+            _draw_anomaly_contours(
+                axes[axis_idx],
+                segmentation,
+                anomaly_score_threshold,
+            )
+
+        for axis in axes:
+            axis.axis("off")
+
+        f.set_size_inches(3 * plot_count, 3)
         f.tight_layout()
         f.savefig(savename)
         plt.close()

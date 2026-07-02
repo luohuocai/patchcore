@@ -8,7 +8,7 @@ import csv
 device = "0"
 # Path to datasets
 
-data_root_srs = r"C:\Users\Administrator\Desktop\dataset\SRS"
+data_root_srs = r"C:\Users\Administrator\Desktop\dataset\SRS\srs_ex"
 
 # Output directories on D drive.
 output_dir = r"D:\lhc\patchcore\gamma\output"
@@ -19,13 +19,13 @@ visualization_output_dir = r"D:\lhc\patchcore\gamma\visualizations"
 test_configs = [
     # {"dataset": "mvtec", "path": data_root_mvtec, "class_name": "bottle"},
     #
-    {"dataset": "srs", "path": data_root_srs, "class_name": "srs_squa"},
+    {"dataset": "srs", "path": data_root_srs, "class_name": "srs_ex"},
 ]
 
 few_shots = [5]  # Define the number of few-shots to evaluate
 
 resolutions = [
-    {"resize": "448x412", "imagesize": "448x412"},
+    {"resize": "608x512", "imagesize": "608x512"},
     # {"resize": "768x320", "imagesize": "768x320"},
     # {"resize": "1024x448", "imagesize": "1024x448"},
 ]
@@ -53,8 +53,13 @@ SUMMARY_COLUMNS = [
     "full_pixel_auroc",
     "anomaly_pixel_auroc",
     "pixel_optimal_threshold",
+    "object_defect_count",
+    "object_hit_count",
+    "object_miss_count",
+    "object_over_count",
     "object_hit_rate",
     "object_miss_rate",
+    "overall_miss_rate",
     "object_over_rate",
     "avg_inference_time_ms_per_image",
     "peak_gpu_memory_mb",
@@ -70,12 +75,21 @@ def patchcore_dataset_name(dataset_name):
     return "mvtec"
 
 
-def is_mvtec_style_class(data_root, class_name):
-    class_root = os.path.join(data_root, class_name)
+def is_mvtec_style_root(path):
     return (
-        os.path.isdir(os.path.join(class_root, "train", "good"))
-        and os.path.isdir(os.path.join(class_root, "test"))
+        os.path.isdir(os.path.join(path, "train", "good"))
+        and os.path.isdir(os.path.join(path, "test"))
     )
+
+
+def class_root_path(data_root, class_name):
+    if is_mvtec_style_root(data_root):
+        return data_root
+    return os.path.join(data_root, class_name)
+
+
+def is_mvtec_style_class(data_root, class_name):
+    return is_mvtec_style_root(class_root_path(data_root, class_name))
 
 
 def count_files(folder):
@@ -91,6 +105,9 @@ def count_files(folder):
 def get_subdatasets(test_dataset, data_root, target_class):
     if target_class.lower() != "all":
         return [target_class]
+
+    if is_mvtec_style_root(data_root):
+        return [os.path.basename(os.path.normpath(data_root))]
 
     meta_path = os.path.join(data_root, "meta.json")
     if os.path.isfile(meta_path):
@@ -112,16 +129,17 @@ def get_subdatasets(test_dataset, data_root, target_class):
 
 def validate_mvtec_style_dataset(data_root, classes, few_shot):
     for class_name in classes:
+        class_root = class_root_path(data_root, class_name)
         if not is_mvtec_style_class(data_root, class_name):
             raise RuntimeError(
                 "Expected MVTec-style structure for class "
                 f"'{class_name}', but did not find train/good and test folders "
-                f"under {os.path.join(data_root, class_name)}."
+                f"under {class_root}."
             )
 
-        train_good_dir = os.path.join(data_root, class_name, "train", "good")
-        test_good_dir = os.path.join(data_root, class_name, "test", "good")
-        test_defect_dir = os.path.join(data_root, class_name, "test", "defect")
+        train_good_dir = os.path.join(class_root, "train", "good")
+        test_good_dir = os.path.join(class_root, "test", "good")
+        test_defect_dir = os.path.join(class_root, "test", "defect")
         train_good_count = count_files(train_good_dir)
         test_good_count = count_files(test_good_dir)
         test_defect_count = count_files(test_defect_dir)

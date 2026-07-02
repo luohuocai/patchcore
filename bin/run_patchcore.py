@@ -79,6 +79,15 @@ def _summarize_inference_stats(inference_stats_per_model):
     default=None,
     help="Optional folder for saved segmentation visualization images.",
 )
+@click.option(
+    "--anomaly_score_threshold",
+    type=click.FloatRange(0.0, 1.0),
+    default=None,
+    help=(
+        "Threshold on normalized pixel anomaly scores for object metrics and "
+        "contour visualization. If omitted, uses the pixel-optimal threshold."
+    ),
+)
 @click.option("--save_patchcore_model", is_flag=True)
 def main(**kwargs):
     pass
@@ -94,6 +103,7 @@ def run(
     log_project,
     save_segmentation_images,
     segmentation_images_path,
+    anomaly_score_threshold,
     save_patchcore_model,
 ):
     methods = {key: item for (key, item) in methods}
@@ -204,6 +214,40 @@ def run(
             ]
             score_gamma = getattr(PatchCore_list[0], "score_gamma", 1.0)
 
+            LOGGER.info("Computing evaluation metrics.")
+            auroc = patchcore.metrics.compute_imagewise_retrieval_metrics(
+                scores, anomaly_labels
+            )["auroc"]
+
+            # Compute PRO score & PW Auroc for all images
+            full_pixel_scores = patchcore.metrics.compute_pixelwise_retrieval_metrics(
+                segmentations, masks_gt
+            )
+            full_pixel_auroc = full_pixel_scores["auroc"]
+            pixel_optimal_threshold = full_pixel_scores["optimal_threshold"]
+            threshold = (
+                anomaly_score_threshold
+                if anomaly_score_threshold is not None
+                else pixel_optimal_threshold
+            )
+
+            object_scores = patchcore.metrics.compute_objectwise_detection_metrics(
+                segmentations,
+                masks_gt,
+                threshold=threshold,
+            )
+
+            # Compute PRO score & PW Auroc only images with anomalies
+            sel_idxs = []
+            for i in range(len(masks_gt)):
+                if np.sum(masks_gt[i]) > 0:
+                    sel_idxs.append(i)
+            pixel_scores = patchcore.metrics.compute_pixelwise_retrieval_metrics(
+                [segmentations[i] for i in sel_idxs],
+                [masks_gt[i] for i in sel_idxs],
+            )
+            anomaly_pixel_auroc = pixel_scores["auroc"]
+
             # (Optional) Plot example images.
             if save_segmentation_images:
                 image_paths = [
@@ -248,47 +292,25 @@ def run(
                     mask_paths,
                     image_transform=image_transform,
                     mask_transform=mask_transform,
+                    anomaly_score_threshold=threshold,
                 )
-
-            LOGGER.info("Computing evaluation metrics.")
-            auroc = patchcore.metrics.compute_imagewise_retrieval_metrics(
-                scores, anomaly_labels
-            )["auroc"]
-
-            # Compute PRO score & PW Auroc for all images
-            full_pixel_scores = patchcore.metrics.compute_pixelwise_retrieval_metrics(
-                segmentations, masks_gt
-            )
-            full_pixel_auroc = full_pixel_scores["auroc"]
-            pixel_optimal_threshold = full_pixel_scores["optimal_threshold"]
-
-            object_scores = patchcore.metrics.compute_objectwise_detection_metrics(
-                segmentations,
-                masks_gt,
-                threshold=pixel_optimal_threshold,
-            )
-
-            # Compute PRO score & PW Auroc only images with anomalies
-            sel_idxs = []
-            for i in range(len(masks_gt)):
-                if np.sum(masks_gt[i]) > 0:
-                    sel_idxs.append(i)
-            pixel_scores = patchcore.metrics.compute_pixelwise_retrieval_metrics(
-                [segmentations[i] for i in sel_idxs],
-                [masks_gt[i] for i in sel_idxs],
-            )
-            anomaly_pixel_auroc = pixel_scores["auroc"]
 
             result_collect.append(
                 {
                     "dataset_name": dataset_name,
                     "score_gamma": score_gamma,
+                    "anomaly_score_threshold": threshold,
                     "instance_auroc": auroc,
                     "full_pixel_auroc": full_pixel_auroc,
                     "anomaly_pixel_auroc": anomaly_pixel_auroc,
                     "pixel_optimal_threshold": pixel_optimal_threshold,
+                    "object_defect_count": object_scores["gt_total"],
+                    "object_hit_count": object_scores["hit"],
+                    "object_miss_count": object_scores["miss"],
+                    "object_over_count": object_scores["over"],
                     "object_hit_rate": object_scores["hit_rate"],
                     "object_miss_rate": object_scores["miss_rate"],
+                    "overall_miss_rate": object_scores["overall_miss_rate"],
                     "object_over_rate": object_scores["over_rate"],
                     "avg_inference_time_ms_per_image": average_inference_time_ms,
                     "peak_gpu_memory_mb": peak_gpu_memory_mb,
@@ -300,6 +322,8 @@ def run(
                 if key != "dataset_name":
                     if key.endswith("threshold"):
                         LOGGER.info("{0}: {1:.6f}".format(key, item))
+                    elif key.endswith("_count"):
+                        LOGGER.info("{0}: {1:d}".format(key, int(item)))
                     else:
                         LOGGER.info("{0}: {1:3.3f}".format(key, item))
 

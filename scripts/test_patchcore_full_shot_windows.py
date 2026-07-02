@@ -12,7 +12,7 @@ data_root_btad = r"C:\Users\Administrator\Desktop\dataset\BTech_Dataset_transfor
 data_root_mvtec_loco = r"C:\Users\Administrator\Desktop\dataset\MVTec_loco"
 data_root_microled = "../../data/microled_AD"
 data_root_miniled = "../../data/miniled_AD"
-data_root_srs = r"C:\Users\Administrator\Desktop\dataset\SRS"
+data_root_srs = r"C:\Users\Administrator\Desktop\dataset\SRS\srs_ex"
 
 # Output directory (Project root / output / patchcore)
 output_dir = "../../output/PatchCore"
@@ -28,7 +28,7 @@ test_configs = [
     # {"dataset": "mvtec_loco", "path": data_root_mvtec_loco, "class_name": "all"},
     # {"dataset": "microled", "path": data_root_microled, "class_name": "all"},
     # {"dataset": "miniled", "path": data_root_miniled, "class_name": "all"},
-    {"dataset": "srs", "path": data_root_srs, "class_name": "srs_cropped"},
+    {"dataset": "srs", "path": data_root_srs, "class_name": "srs_ex"},
 ]
 
 # We map all to "mvtec" format in patchcore, but pass the different paths.
@@ -45,12 +45,21 @@ def patchcore_dataset_name(dataset_name):
     return "mvtec"
 
 
-def is_mvtec_style_class(data_root, class_name):
-    class_root = os.path.join(data_root, class_name)
+def is_mvtec_style_root(path):
     return (
-        os.path.isdir(os.path.join(class_root, "train", "good"))
-        and os.path.isdir(os.path.join(class_root, "test"))
+        os.path.isdir(os.path.join(path, "train", "good"))
+        and os.path.isdir(os.path.join(path, "test"))
     )
+
+
+def class_root_path(data_root, class_name):
+    if is_mvtec_style_root(data_root):
+        return data_root
+    return os.path.join(data_root, class_name)
+
+
+def is_mvtec_style_class(data_root, class_name):
+    return is_mvtec_style_root(class_root_path(data_root, class_name))
 
 
 def count_files(folder):
@@ -66,6 +75,9 @@ def count_files(folder):
 def get_subdatasets(test_dataset, data_root, target_class):
     if target_class.lower() != "all":
         return [target_class]
+
+    if is_mvtec_style_root(data_root):
+        return [os.path.basename(os.path.normpath(data_root))]
 
     meta_path = os.path.join(data_root, "meta.json")
     if os.path.isfile(meta_path):
@@ -87,16 +99,17 @@ def get_subdatasets(test_dataset, data_root, target_class):
 
 def validate_mvtec_style_dataset(data_root, classes):
     for class_name in classes:
+        class_root = class_root_path(data_root, class_name)
         if not is_mvtec_style_class(data_root, class_name):
             raise RuntimeError(
                 "Expected MVTec-style structure for class "
                 f"'{class_name}', but did not find train/good and test folders "
-                f"under {os.path.join(data_root, class_name)}."
+                f"under {class_root}."
             )
 
-        train_good_dir = os.path.join(data_root, class_name, "train", "good")
-        test_good_dir = os.path.join(data_root, class_name, "test", "good")
-        test_defect_dir = os.path.join(data_root, class_name, "test", "defect")
+        train_good_dir = os.path.join(class_root, "train", "good")
+        test_good_dir = os.path.join(class_root, "test", "good")
+        test_defect_dir = os.path.join(class_root, "test", "defect")
         train_good_count = count_files(train_good_dir)
         test_good_count = count_files(test_good_dir)
         test_defect_count = count_files(test_defect_dir)

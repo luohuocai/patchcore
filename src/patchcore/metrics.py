@@ -4,7 +4,6 @@ from scipy import ndimage
 from sklearn import metrics
 
 
-DEFAULT_HIT_IOU_THRESHOLD = 0.10
 DEFAULT_MIN_COMPONENT_AREA = 1
 
 
@@ -101,81 +100,49 @@ def _as_2d_mask(mask):
     if mask.ndim == 3 and mask.shape[-1] in (1, 3):
         return np.max(mask, axis=-1)
 
-    raise ValueError("Expected a 2D mask or a mask with a singleton/channel dimension.")
+    raise ValueError(
+        "Expected a 2D mask or a mask with a singleton/channel dimension."
+    )
 
 
-def _connected_component_bboxes(mask, min_component_area):
+def _connected_components(mask, min_component_area):
     mask = _as_2d_mask(mask).astype(bool)
-    labels, num_labels = ndimage.label(mask)
+    labels, _ = ndimage.label(mask)
     objects = ndimage.find_objects(labels)
 
-    bboxes = []
+    components = []
     for label_id, slices in enumerate(objects, start=1):
         if slices is None:
             continue
 
-        ys, xs = slices
-        area = int(np.sum(labels[slices] == label_id))
+        component_mask = labels[slices] == label_id
+        area = int(np.sum(component_mask))
         if area < min_component_area:
             continue
 
-        bboxes.append(
-            (
-                float(xs.start),
-                float(ys.start),
-                float(xs.stop),
-                float(ys.stop),
-            )
-        )
-
-    if num_labels == 0:
-        return []
-    return bboxes
+        components.append((slices, component_mask))
+    return components
 
 
-def _intersection_area(a, b):
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
-    inter_x1 = max(ax1, bx1)
-    inter_y1 = max(ay1, by1)
-    inter_x2 = min(ax2, bx2)
-    inter_y2 = min(ay2, by2)
-    inter_w = max(0.0, inter_x2 - inter_x1)
-    inter_h = max(0.0, inter_y2 - inter_y1)
-    return inter_w * inter_h
+def _component_overlaps_mask(component, mask):
+    slices, component_mask = component
+    return bool(np.any(mask[slices][component_mask]))
 
 
-def _bbox_iou(a, b):
-    inter = _intersection_area(a, b)
-    if inter <= 0:
-        return 0.0
-
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
-    area_a = max(0.0, (ax2 - ax1) * (ay2 - ay1))
-    area_b = max(0.0, (bx2 - bx1) * (by2 - by1))
-    union = area_a + area_b - inter
-    if union <= 0:
-        return 0.0
-    return inter / union
-
-
-def _evaluate_hit_miss(pred_bboxes, gt_bboxes, hit_iou_threshold):
-    gt_hit = [False] * len(gt_bboxes)
-    pred_hit = [False] * len(pred_bboxes)
-
-    for gt_idx, gt_bbox in enumerate(gt_bboxes):
-        for pred_bbox in pred_bboxes:
-            if _bbox_iou(gt_bbox, pred_bbox) >= hit_iou_threshold:
-                gt_hit[gt_idx] = True
-                break
-
-    for pred_idx, pred_bbox in enumerate(pred_bboxes):
-        for gt_bbox in gt_bboxes:
-            if _bbox_iou(pred_bbox, gt_bbox) >= hit_iou_threshold:
-                pred_hit[pred_idx] = True
-                break
-
+def _evaluate_contour_overlaps(
+    gt_components,
+    pred_components,
+    gt_mask,
+    pred_mask,
+):
+    gt_hit = [
+        _component_overlaps_mask(gt_component, pred_mask)
+        for gt_component in gt_components
+    ]
+    pred_hit = [
+        _component_overlaps_mask(pred_component, gt_mask)
+        for pred_component in pred_components
+    ]
     return gt_hit, pred_hit
 
 
@@ -183,16 +150,19 @@ def compute_objectwise_detection_metrics(
     anomaly_segmentations,
     ground_truth_masks,
     threshold,
-    hit_iou_threshold=DEFAULT_HIT_IOU_THRESHOLD,
+    hit_iou_threshold=None,
     min_component_area=DEFAULT_MIN_COMPONENT_AREA,
 ):
     """
     Computes object-level hit, miss and over-detection metrics.
 
-    The matching rule follows the provided deep-defect batch script:
-    a GT object is hit if any predicted component bbox reaches the IoU threshold,
-    and a predicted object is over-detection if it matches no GT bbox.
+    Each predicted contour is represented by one thresholded connected component.
+    A GT object is hit if any predicted contour overlaps that GT mask component.
+    A predicted contour is over-detection if it does not overlap any GT anomaly
+    pixel. IoU is not used.
     """
+    del hit_iou_threshold
+
     anomaly_segmentations = _as_numpy_stack(anomaly_segmentations)
     ground_truth_masks = _as_numpy_stack(ground_truth_masks)
 
@@ -207,44 +177,43 @@ def compute_objectwise_detection_metrics(
     per_image = []
 
     for segmentation, gt_mask in zip(anomaly_segmentations, ground_truth_masks):
-        pred_bboxes = _connected_component_bboxes(
-            _as_2d_mask(segmentation) >= threshold,
-            min_component_area=min_component_area,
-        )
-        gt_bboxes = _connected_component_bboxes(
-            _as_2d_mask(gt_mask) > 0,
-            min_component_area=min_component_area,
-        )
+        segmentation = _as_2d_mask(segmentation)
+        gt_mask = _as_2d_mask(gt_mask) > 0
+        pred_mask = segmentation >= threshold
+        pred_components = _connected_components(pred_mask, min_component_area)
+        gt_components = _connected_components(gt_mask, min_component_area)
 
-        gt_hit, pred_hit = _evaluate_hit_miss(
-            pred_bboxes,
-            gt_bboxes,
-            hit_iou_threshold=hit_iou_threshold,
+        gt_hit, pred_hit = _evaluate_contour_overlaps(
+            gt_components,
+            pred_components,
+            gt_mask,
+            pred_mask,
         )
 
         hit = int(np.sum(gt_hit))
-        miss = len(gt_bboxes) - hit
+        miss = len(gt_components) - hit
         over = int(len(pred_hit) - np.sum(pred_hit))
 
-        total_gt += len(gt_bboxes)
-        total_pred += len(pred_bboxes)
+        total_gt += len(gt_components)
+        total_pred += len(pred_components)
         total_hit += hit
         total_miss += miss
         total_over += over
 
         per_image.append(
             {
-                "gt_count": len(gt_bboxes),
-                "pred_count": len(pred_bboxes),
+                "gt_count": len(gt_components),
+                "pred_count": len(pred_components),
                 "hit": hit,
                 "miss": miss,
                 "over": over,
-                "hit_rate": hit / len(gt_bboxes) if gt_bboxes else 0.0,
-                "miss_rate": miss / len(gt_bboxes) if gt_bboxes else 0.0,
-                "over_rate": over / len(pred_bboxes) if pred_bboxes else 0.0,
+                "hit_rate": hit / len(gt_components) if gt_components else 0.0,
+                "miss_rate": miss / len(gt_components) if gt_components else 0.0,
+                "over_rate": over / len(pred_components) if pred_components else 0.0,
             }
         )
 
+    overall_miss_rate = total_miss / total_gt if total_gt > 0 else 0.0
     return {
         "gt_total": total_gt,
         "pred_total": total_pred,
@@ -252,10 +221,11 @@ def compute_objectwise_detection_metrics(
         "miss": total_miss,
         "over": total_over,
         "hit_rate": total_hit / total_gt if total_gt > 0 else 0.0,
-        "miss_rate": total_miss / total_gt if total_gt > 0 else 0.0,
+        "miss_rate": overall_miss_rate,
+        "overall_miss_rate": overall_miss_rate,
         "over_rate": total_over / total_pred if total_pred > 0 else 0.0,
         "threshold": float(threshold),
-        "hit_iou_threshold": hit_iou_threshold,
+        "hit_rule": "predicted_contour_overlaps_gt_mask",
         "min_component_area": min_component_area,
         "per_image": per_image,
     }

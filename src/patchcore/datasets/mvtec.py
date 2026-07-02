@@ -72,13 +72,11 @@ class MVTecDataset(torch.utils.data.Dataset):
         super().__init__()
         self.source = source
         self.split = split
-        if classname == "all":
-            self.classnames_to_use = [d for d in os.listdir(self.source) if os.path.isdir(os.path.join(self.source, d))]
-        else:
-            self.classnames_to_use = [classname] if classname is not None else _CLASSNAMES
         self.train_val_split = train_val_split
         self.k_shot = k_shot
         self.seed = seed
+        self.class_roots = self._resolve_class_roots(classname)
+        self.classnames_to_use = list(self.class_roots.keys())
 
         self.imgpaths_per_class, self.data_to_iterate = self.get_image_data()
 
@@ -124,13 +122,51 @@ class MVTecDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.data_to_iterate)
 
+    @staticmethod
+    def _is_class_root(path):
+        return (
+            os.path.isdir(os.path.join(path, "train", "good"))
+            and os.path.isdir(os.path.join(path, "test"))
+        )
+
+    def _resolve_class_roots(self, classname):
+        source_is_class_root = self._is_class_root(self.source)
+        source_classname = os.path.basename(os.path.normpath(self.source))
+
+        if classname == "all":
+            if source_is_class_root:
+                return {source_classname: self.source}
+
+            class_roots = {}
+            for candidate in sorted(os.listdir(self.source)):
+                candidate_root = os.path.join(self.source, candidate)
+                if self._is_class_root(candidate_root):
+                    class_roots[candidate] = candidate_root
+            return class_roots
+
+        if classname is None:
+            if source_is_class_root:
+                return {source_classname: self.source}
+            return {
+                class_name: os.path.join(self.source, class_name)
+                for class_name in _CLASSNAMES
+            }
+
+        class_root = os.path.join(self.source, classname)
+        if self._is_class_root(class_root):
+            return {classname: class_root}
+        if source_is_class_root:
+            return {classname: self.source}
+        return {classname: class_root}
+
     def get_image_data(self):
         imgpaths_per_class = {}
         maskpaths_per_class = {}
 
         for classname in self.classnames_to_use:
-            classpath = os.path.join(self.source, classname, self.split.value)
-            maskpath = os.path.join(self.source, classname, "ground_truth")
+            class_root = self.class_roots[classname]
+            classpath = os.path.join(class_root, self.split.value)
+            maskpath = os.path.join(class_root, "ground_truth")
             anomaly_types = os.listdir(classpath)
 
             imgpaths_per_class[classname] = {}

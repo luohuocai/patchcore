@@ -25,7 +25,9 @@ def test_objectwise_detection_metrics_counts_hit_miss_and_over():
     assert result["over"] == 1
     assert result["hit_rate"] == 0.5
     assert result["miss_rate"] == 0.5
+    assert result["overall_miss_rate"] == 0.5
     assert result["over_rate"] == 0.5
+    assert result["hit_rule"] == "predicted_contour_overlaps_gt_mask"
 
 
 def test_objectwise_detection_metrics_counts_predictions_without_gt_as_over():
@@ -47,4 +49,26 @@ def test_objectwise_detection_metrics_counts_predictions_without_gt_as_over():
     assert result["over"] == 1
     assert result["hit_rate"] == 0.0
     assert result["miss_rate"] == 0.0
+    assert result["overall_miss_rate"] == 0.0
     assert result["over_rate"] == 1.0
+
+
+def test_objectwise_detection_metrics_counts_any_contour_overlap_as_hit():
+    segmentations = np.zeros((1, 20, 20), dtype=np.float32)
+    ground_truth_masks = np.zeros((1, 20, 20), dtype=np.uint8)
+
+    ground_truth_masks[0, 2:18, 2:18] = 1
+    segmentations[0, 17:20, 17:20] = 0.9
+
+    result = metrics.compute_objectwise_detection_metrics(
+        segmentations,
+        ground_truth_masks,
+        threshold=0.5,
+    )
+
+    assert result["gt_total"] == 1
+    assert result["pred_total"] == 1
+    assert result["hit"] == 1
+    assert result["miss"] == 0
+    assert result["over"] == 0
+    assert result["overall_miss_rate"] == 0.0
