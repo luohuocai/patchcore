@@ -8,24 +8,24 @@ import csv
 device = "0"
 # Path to datasets
 
-data_root_srs = r"C:\Users\Administrator\Desktop\dataset\SRS\srs_ex"
+data_root_srs = r"C:\Users\Administrator\Desktop\dataset\SRS"
 
 # Output directories on D drive.
-output_dir = r"D:\lhc\patchcore\gamma\output"
-visualization_output_dir = r"D:\lhc\patchcore\gamma\visualizations"
+output_dir = r"D:\lhc\patchcore\red_line\output"
+visualization_output_dir = r"D:\lhc\patchcore\red_line\visualizations"
 # Define test configurations
 # We map the datasets as "mvtec" to reuse the MVTecDataset class structure for
 # SRS/microled/miniled as well.
 test_configs = [
     # {"dataset": "mvtec", "path": data_root_mvtec, "class_name": "bottle"},
     #
-    {"dataset": "srs", "path": data_root_srs, "class_name": "srs_ex"},
+    {"dataset": "srs", "path": data_root_srs, "class_name": "srs_squa"},
 ]
 
 few_shots = [5]  # Define the number of few-shots to evaluate
 
 resolutions = [
-    {"resize": "608x512", "imagesize": "608x512"},
+    {"resize": "448x416", "imagesize": "448x416"},
     # {"resize": "768x320", "imagesize": "768x320"},
     # {"resize": "1024x448", "imagesize": "1024x448"},
 ]
