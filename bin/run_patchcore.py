@@ -79,6 +79,13 @@ def _summarize_inference_stats(inference_stats_per_model):
     default=None,
     help="Optional folder for saved segmentation visualization images.",
 )
+@click.option("--save_segmentation_maps", is_flag=True)
+@click.option(
+    "--segmentation_maps_path",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Optional folder for saved raw segmentation score maps.",
+)
 @click.option(
     "--anomaly_score_threshold",
     type=click.FloatRange(0.0, 1.0),
@@ -103,6 +110,8 @@ def run(
     log_project,
     save_segmentation_images,
     segmentation_images_path,
+    save_segmentation_maps,
+    segmentation_maps_path,
     anomaly_score_threshold,
     save_patchcore_model,
 ):
@@ -213,6 +222,10 @@ def run(
                 x[1] != "good" for x in dataloaders["testing"].dataset.data_to_iterate
             ]
             score_gamma = getattr(PatchCore_list[0], "score_gamma", 1.0)
+            fastref_enabled_value = getattr(
+                PatchCore_list[0], "fastref_enabled", False
+            )
+            fastref_params = getattr(PatchCore_list[0], "fastref_params", {})
 
             LOGGER.info("Computing evaluation metrics.")
             auroc = patchcore.metrics.compute_imagewise_retrieval_metrics(
@@ -248,15 +261,15 @@ def run(
             )
             anomaly_pixel_auroc = pixel_scores["auroc"]
 
+            image_paths = [
+                x[2] for x in dataloaders["testing"].dataset.data_to_iterate
+            ]
+            mask_paths = [
+                x[3] for x in dataloaders["testing"].dataset.data_to_iterate
+            ]
+
             # (Optional) Plot example images.
             if save_segmentation_images:
-                image_paths = [
-                    x[2] for x in dataloaders["testing"].dataset.data_to_iterate
-                ]
-                mask_paths = [
-                    x[3] for x in dataloaders["testing"].dataset.data_to_iterate
-                ]
-
                 def image_transform(image):
                     in_std = np.array(
                         dataloaders["testing"].dataset.transform_std
@@ -295,10 +308,38 @@ def run(
                     anomaly_score_threshold=threshold,
                 )
 
+            # (Optional) Save raw score maps for region-level post-processing.
+            if save_segmentation_maps:
+                if segmentation_maps_path is None:
+                    map_save_path = os.path.join(
+                        run_save_path,
+                        "segmentation_maps",
+                        dataset_name,
+                        resolution_folder,
+                    )
+                else:
+                    map_save_path = os.path.join(
+                        segmentation_maps_path, dataset_name, resolution_folder
+                    )
+                index_path = patchcore.utils.save_segmentation_maps(
+                    map_save_path,
+                    image_paths,
+                    segmentations,
+                    scores,
+                )
+                LOGGER.info("Saved segmentation map index to: {}".format(index_path))
+
             result_collect.append(
                 {
                     "dataset_name": dataset_name,
                     "score_gamma": score_gamma,
+                    "fastref_enabled": int(fastref_enabled_value),
+                    "fastref_lambda": fastref_params.get("fastref_lambda", ""),
+                    "fastref_iterations": fastref_params.get("fastref_iterations", ""),
+                    "fastref_sinkhorn_iterations": fastref_params.get(
+                        "fastref_sinkhorn_iterations", ""
+                    ),
+                    "fastref_epsilon": fastref_params.get("fastref_epsilon", ""),
                     "anomaly_score_threshold": threshold,
                     "instance_auroc": auroc,
                     "full_pixel_auroc": full_pixel_auroc,
@@ -377,6 +418,20 @@ def run(
     show_default=True,
     help="Gamma correction applied to patch scores before heatmap generation. Use >1 to suppress weak responses.",
 )
+@click.option(
+    "--fastref",
+    "fastref_enabled",
+    is_flag=True,
+    help="Enable FastRef-style query-time prototype refinement for few-shot PatchCore.",
+)
+@click.option("--fastref_lambda", type=float, default=1.0, show_default=True)
+@click.option("--fastref_iterations", type=int, default=2, show_default=True)
+@click.option(
+    "--fastref_sinkhorn_iterations", type=int, default=10, show_default=True
+)
+@click.option("--fastref_epsilon", type=float, default=0.05, show_default=True)
+@click.option("--fastref_ridge", type=float, default=1e-5, show_default=True)
+@click.option("--fastref_chunk_size", type=int, default=1024, show_default=True)
 @click.option("--patchoverlap", type=float, default=0.0)
 @click.option("--patchsize_aggregate", "-pa", type=int, multiple=True, default=[])
 # NN on GPU.
@@ -392,6 +447,13 @@ def patch_core(
     patchsize,
     patchscore,
     score_gamma,
+    fastref_enabled,
+    fastref_lambda,
+    fastref_iterations,
+    fastref_sinkhorn_iterations,
+    fastref_epsilon,
+    fastref_ridge,
+    fastref_chunk_size,
     patchoverlap,
     anomaly_scorer_num_nn,
     patchsize_aggregate,
@@ -433,6 +495,13 @@ def patch_core(
                 target_embed_dimension=target_embed_dimension,
                 patchsize=patchsize,
                 score_gamma=score_gamma,
+                fastref_enabled=fastref_enabled,
+                fastref_lambda=fastref_lambda,
+                fastref_iterations=fastref_iterations,
+                fastref_sinkhorn_iterations=fastref_sinkhorn_iterations,
+                fastref_epsilon=fastref_epsilon,
+                fastref_ridge=fastref_ridge,
+                fastref_chunk_size=fastref_chunk_size,
                 featuresampler=sampler,
                 anomaly_scorer_num_nn=anomaly_scorer_num_nn,
                 nn_method=nn_method,

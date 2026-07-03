@@ -12,6 +12,7 @@ import tqdm
 import patchcore
 import patchcore.backbones
 import patchcore.common
+import patchcore.fastref
 import patchcore.sampler
 
 LOGGER = logging.getLogger(__name__)
@@ -36,6 +37,13 @@ class PatchCore(torch.nn.Module):
         patchstride=1,
         anomaly_score_num_nn=1,
         score_gamma=1.0,
+        fastref_enabled=False,
+        fastref_lambda=1.0,
+        fastref_iterations=2,
+        fastref_sinkhorn_iterations=10,
+        fastref_epsilon=0.05,
+        fastref_ridge=1e-5,
+        fastref_chunk_size=1024,
         featuresampler=patchcore.sampler.IdentitySampler(),
         nn_method=patchcore.common.FaissNN(False, 4),
         **kwargs,
@@ -81,6 +89,30 @@ class PatchCore(torch.nn.Module):
         self.score_gamma = float(score_gamma)
         if self.score_gamma <= 0:
             raise ValueError("score_gamma must be > 0.")
+        self.fastref_enabled = bool(fastref_enabled)
+        self.fastref_params = {
+            "fastref_lambda": float(fastref_lambda),
+            "fastref_iterations": int(fastref_iterations),
+            "fastref_sinkhorn_iterations": int(fastref_sinkhorn_iterations),
+            "fastref_epsilon": float(fastref_epsilon),
+            "fastref_ridge": float(fastref_ridge),
+            "fastref_chunk_size": int(fastref_chunk_size),
+        }
+        self.fastrefiner = (
+            patchcore.fastref.FastRefiner(
+                device=self.device,
+                balance=self.fastref_params["fastref_lambda"],
+                iterations=self.fastref_params["fastref_iterations"],
+                sinkhorn_iterations=self.fastref_params[
+                    "fastref_sinkhorn_iterations"
+                ],
+                epsilon=self.fastref_params["fastref_epsilon"],
+                ridge=self.fastref_params["fastref_ridge"],
+                chunk_size=self.fastref_params["fastref_chunk_size"],
+            )
+            if self.fastref_enabled
+            else None
+        )
 
     def _apply_score_gamma(self, patch_scores):
         if self.score_gamma == 1.0:
@@ -190,6 +222,8 @@ class PatchCore(torch.nn.Module):
         features = self.featuresampler.run(features)
 
         self.anomaly_scorer.fit(detection_features=[features])
+        if self.fastrefiner is not None:
+            self.fastrefiner.fit(self.anomaly_scorer.detection_features)
 
     def predict(self, data):
         if isinstance(data, torch.utils.data.DataLoader):
@@ -326,7 +360,20 @@ class PatchCore(torch.nn.Module):
             features, patch_shapes = self._embed(images, provide_patch_shapes=True)
             features = np.asarray(features)
 
-            patch_scores = image_scores = self.anomaly_scorer.predict([features])[0]
+            if self.fastrefiner is not None:
+                patch_count = patch_shapes[0][0] * patch_shapes[0][1]
+                features_per_image = features.reshape(batchsize, patch_count, -1)
+                fastref_patch_scores = []
+                for image_features in features_per_image:
+                    image_patch_scores, _ = self.fastrefiner.predict(image_features)
+                    fastref_patch_scores.append(image_patch_scores)
+                patch_scores = image_scores = np.concatenate(
+                    fastref_patch_scores, axis=0
+                )
+            else:
+                patch_scores = image_scores = self.anomaly_scorer.predict([features])[
+                    0
+                ]
             image_scores = self.patch_maker.unpatch_scores(
                 image_scores, batchsize=batchsize
             )
@@ -351,7 +398,9 @@ class PatchCore(torch.nn.Module):
     def save_to_path(self, save_path: str, prepend: str = "") -> None:
         LOGGER.info("Saving PatchCore data.")
         self.anomaly_scorer.save(
-            save_path, save_features_separately=False, prepend=prepend
+            save_path,
+            save_features_separately=self.fastref_enabled,
+            prepend=prepend,
         )
         patchcore_params = {
             "backbone.name": self.backbone.name,
@@ -367,6 +416,8 @@ class PatchCore(torch.nn.Module):
             "patchstride": self.patch_maker.stride,
             "anomaly_scorer_num_nn": self.anomaly_scorer.n_nearest_neighbours,
             "score_gamma": self.score_gamma,
+            "fastref_enabled": self.fastref_enabled,
+            **self.fastref_params,
         }
         with open(self._params_file(save_path, prepend), "wb") as save_file:
             pickle.dump(patchcore_params, save_file, pickle.HIGHEST_PROTOCOL)
@@ -378,6 +429,13 @@ class PatchCore(torch.nn.Module):
         nn_method: patchcore.common.FaissNN(False, 4),
         prepend: str = "",
         score_gamma: float = None,
+        fastref_enabled: bool = None,
+        fastref_lambda: float = None,
+        fastref_iterations: int = None,
+        fastref_sinkhorn_iterations: int = None,
+        fastref_epsilon: float = None,
+        fastref_ridge: float = None,
+        fastref_chunk_size: int = None,
     ) -> None:
         LOGGER.info("Loading and initializing PatchCore.")
         with open(self._params_file(load_path, prepend), "rb") as load_file:
@@ -389,9 +447,28 @@ class PatchCore(torch.nn.Module):
         del patchcore_params["backbone.name"]
         if score_gamma is not None:
             patchcore_params["score_gamma"] = score_gamma
+        fastref_overrides = {
+            "fastref_enabled": fastref_enabled,
+            "fastref_lambda": fastref_lambda,
+            "fastref_iterations": fastref_iterations,
+            "fastref_sinkhorn_iterations": fastref_sinkhorn_iterations,
+            "fastref_epsilon": fastref_epsilon,
+            "fastref_ridge": fastref_ridge,
+            "fastref_chunk_size": fastref_chunk_size,
+        }
+        for key, value in fastref_overrides.items():
+            if value is not None:
+                patchcore_params[key] = value
         self.load(**patchcore_params, device=device, nn_method=nn_method)
 
         self.anomaly_scorer.load(load_path, prepend)
+        if self.fastrefiner is not None:
+            if not hasattr(self.anomaly_scorer, "detection_features"):
+                raise RuntimeError(
+                    "FastRef requires saved nnscorer_features.pkl, but this "
+                    "PatchCore model was saved without memory-bank features."
+                )
+            self.fastrefiner.fit(self.anomaly_scorer.detection_features)
 
 
 # Image handling classes.

@@ -191,6 +191,59 @@ def plot_segmentation_images(
         plt.close()
 
 
+def save_segmentation_maps(
+    savefolder,
+    image_paths,
+    segmentations,
+    anomaly_scores=None,
+    save_depth=4,
+):
+    """Save raw anomaly score maps and an index CSV for later post-processing."""
+    if anomaly_scores is None:
+        anomaly_scores = ["-1" for _ in range(len(image_paths))]
+
+    os.makedirs(savefolder, exist_ok=True)
+    index_path = os.path.join(savefolder, "segmentation_maps.csv")
+    rows = []
+
+    for image_idx, (image_path, anomaly_score, segmentation) in enumerate(
+        zip(image_paths, anomaly_scores, segmentations)
+    ):
+        segmentation = _to_score_map(segmentation).astype(np.float32)
+        savename_parts = os.path.normpath(image_path).split(os.sep)
+        savename = "_".join(savename_parts[-save_depth:])
+        savename = os.path.splitext(savename)[0]
+        map_name = "{:06d}_{}.npy".format(image_idx, savename)
+        map_path = os.path.join(savefolder, map_name)
+        np.save(map_path, segmentation)
+        rows.append(
+            {
+                "index": image_idx,
+                "image_path": image_path,
+                "map_path": map_path,
+                "anomaly_score": anomaly_score,
+                "map_height": segmentation.shape[0],
+                "map_width": segmentation.shape[1],
+            }
+        )
+
+    with open(index_path, "w", newline="") as index_file:
+        writer = csv.DictWriter(
+            index_file,
+            fieldnames=[
+                "index",
+                "image_path",
+                "map_path",
+                "anomaly_score",
+                "map_height",
+                "map_width",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+    return index_path
+
+
 def create_storage_folder(
     main_folder_path,
     project_folder,

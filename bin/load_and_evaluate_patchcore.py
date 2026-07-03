@@ -29,6 +29,7 @@ _DATASETS = {
 @click.option("--gpu", type=int, default=[0], multiple=True, show_default=True)
 @click.option("--seed", type=int, default=0, show_default=True)
 @click.option("--save_segmentation_images", is_flag=True)
+@click.option("--save_segmentation_maps", is_flag=True)
 @click.option(
     "--anomaly_score_threshold",
     type=click.FloatRange(0.0, 1.0),
@@ -49,6 +50,7 @@ def run(
     gpu,
     seed,
     save_segmentation_images,
+    save_segmentation_maps,
     anomaly_score_threshold,
 ):
     methods = {key: item for (key, item) in methods}
@@ -139,6 +141,10 @@ def run(
                 x[1] != "good" for x in dataloaders["testing"].dataset.data_to_iterate
             ]
             score_gamma_value = getattr(PatchCore_list[0], "score_gamma", 1.0)
+            fastref_enabled_value = getattr(
+                PatchCore_list[0], "fastref_enabled", False
+            )
+            fastref_params = getattr(PatchCore_list[0], "fastref_params", {})
 
             LOGGER.info("Computing evaluation metrics.")
             # Compute Image-level AUROC scores for all images.
@@ -174,15 +180,15 @@ def run(
             )
             anomaly_pixel_auroc = pixel_scores["auroc"]
 
+            image_paths = [
+                x[2] for x in dataloaders["testing"].dataset.data_to_iterate
+            ]
+            mask_paths = [
+                x[3] for x in dataloaders["testing"].dataset.data_to_iterate
+            ]
+
             # Plot Example Images.
             if save_segmentation_images:
-                image_paths = [
-                    x[2] for x in dataloaders["testing"].dataset.data_to_iterate
-                ]
-                mask_paths = [
-                    x[3] for x in dataloaders["testing"].dataset.data_to_iterate
-                ]
-
                 def image_transform(image):
                     in_std = np.array(
                         dataloaders["testing"].dataset.transform_std
@@ -209,10 +215,31 @@ def run(
                     anomaly_score_threshold=threshold,
                 )
 
+            if save_segmentation_maps:
+                map_save_path = os.path.join(
+                    run_save_path,
+                    "segmentation_maps",
+                    dataset_name,
+                )
+                index_path = patchcore.utils.save_segmentation_maps(
+                    map_save_path,
+                    image_paths,
+                    segmentations,
+                    scores,
+                )
+                LOGGER.info("Saved segmentation map index to: {}".format(index_path))
+
             result_collect.append(
                 {
                     "dataset_name": dataset_name,
                     "score_gamma": score_gamma_value,
+                    "fastref_enabled": int(fastref_enabled_value),
+                    "fastref_lambda": fastref_params.get("fastref_lambda", ""),
+                    "fastref_iterations": fastref_params.get("fastref_iterations", ""),
+                    "fastref_sinkhorn_iterations": fastref_params.get(
+                        "fastref_sinkhorn_iterations", ""
+                    ),
+                    "fastref_epsilon": fastref_params.get("fastref_epsilon", ""),
                     "anomaly_score_threshold": threshold,
                     "instance_auroc": auroc,
                     "full_pixel_auroc": full_pixel_auroc,
@@ -263,10 +290,35 @@ def run(
     default=None,
     help="Override saved gamma correction for patch scores before heatmap generation. Use >1 to suppress weak responses.",
 )
+@click.option(
+    "--fastref",
+    "fastref_enabled",
+    is_flag=True,
+    default=None,
+    help="Enable FastRef-style query-time prototype refinement for loaded models.",
+)
+@click.option("--fastref_lambda", type=float, default=None)
+@click.option("--fastref_iterations", type=int, default=None)
+@click.option("--fastref_sinkhorn_iterations", type=int, default=None)
+@click.option("--fastref_epsilon", type=float, default=None)
+@click.option("--fastref_ridge", type=float, default=None)
+@click.option("--fastref_chunk_size", type=int, default=None)
 # NN on GPU.
 @click.option("--faiss_on_gpu", is_flag=True)
 @click.option("--faiss_num_workers", type=int, default=8)
-def patch_core_loader(patch_core_paths, score_gamma, faiss_on_gpu, faiss_num_workers):
+def patch_core_loader(
+    patch_core_paths,
+    score_gamma,
+    fastref_enabled,
+    fastref_lambda,
+    fastref_iterations,
+    fastref_sinkhorn_iterations,
+    fastref_epsilon,
+    fastref_ridge,
+    fastref_chunk_size,
+    faiss_on_gpu,
+    faiss_num_workers,
+):
     def get_patchcore_iter(device):
         for patch_core_path in patch_core_paths:
             loaded_patchcores = []
@@ -282,6 +334,13 @@ def patch_core_loader(patch_core_paths, score_gamma, faiss_on_gpu, faiss_num_wor
                     device=device,
                     nn_method=nn_method,
                     score_gamma=score_gamma,
+                    fastref_enabled=fastref_enabled,
+                    fastref_lambda=fastref_lambda,
+                    fastref_iterations=fastref_iterations,
+                    fastref_sinkhorn_iterations=fastref_sinkhorn_iterations,
+                    fastref_epsilon=fastref_epsilon,
+                    fastref_ridge=fastref_ridge,
+                    fastref_chunk_size=fastref_chunk_size,
                 )
                 loaded_patchcores.append(patchcore_instance)
             else:
@@ -296,6 +355,13 @@ def patch_core_loader(patch_core_paths, score_gamma, faiss_on_gpu, faiss_num_wor
                         nn_method=nn_method,
                         prepend="Ensemble-{}-{}_".format(i + 1, n_patchcores),
                         score_gamma=score_gamma,
+                        fastref_enabled=fastref_enabled,
+                        fastref_lambda=fastref_lambda,
+                        fastref_iterations=fastref_iterations,
+                        fastref_sinkhorn_iterations=fastref_sinkhorn_iterations,
+                        fastref_epsilon=fastref_epsilon,
+                        fastref_ridge=fastref_ridge,
+                        fastref_chunk_size=fastref_chunk_size,
                     )
                     loaded_patchcores.append(patchcore_instance)
 

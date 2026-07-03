@@ -11,8 +11,8 @@ device = "0"
 data_root_srs = r"C:\Users\Administrator\Desktop\dataset\SRS"
 
 # Output directories on D drive.
-output_dir = r"D:\lhc\patchcore\red_line\output"
-visualization_output_dir = r"D:\lhc\patchcore\red_line\visualizations"
+output_dir = r"D:\lhc\patchcore\fastref\csv"
+visualization_output_dir = r"D:\lhc\patchcore\fastref_epsilon0.1\visualizations"
 # Define test configurations
 # We map the datasets as "mvtec" to reuse the MVTecDataset class structure for
 # SRS/microled/miniled as well.
@@ -37,6 +37,14 @@ resolutions = [
 
 backbone_name = "wideresnet50" # PatchCore default backbone
 score_gamma = 1  # >1 suppresses weak patch-score responses in heatmaps.
+enable_fastref = True
+sampler_percentage = 0.05 if enable_fastref else 0.1
+fastref_lambda = 0.3
+fastref_iterations = 2
+fastref_sinkhorn_iterations = 10
+fastref_epsilon = 0.1
+fastref_ridge = 1e-5
+fastref_chunk_size = 1024
 
 SUMMARY_COLUMNS = [
     "dataset",
@@ -45,6 +53,12 @@ SUMMARY_COLUMNS = [
     "resize",
     "imagesize",
     "score_gamma",
+    "sampler_percentage",
+    "fastref_enabled",
+    "fastref_lambda",
+    "fastref_iterations",
+    "fastref_sinkhorn_iterations",
+    "fastref_epsilon",
     "input_height",
     "input_width",
     "input_pixels",
@@ -209,6 +223,10 @@ def input_size_summary(imagesize):
     }
 
 
+def method_name():
+    return "patchcore_fastref" if enable_fastref else "patchcore"
+
+
 def summary_csv_filename(resolutions):
     resolution_names = []
     for resolution in resolutions:
@@ -218,8 +236,8 @@ def summary_csv_filename(resolutions):
 
     suffix = "_".join(resolution_names)
     if suffix:
-        return f"srs_few_shot_resolution_summary_{suffix}.csv"
-    return "srs_few_shot_resolution_summary.csv"
+        return f"srs_{method_name()}_few_shot_resolution_summary_{suffix}.csv"
+    return f"srs_{method_name()}_few_shot_resolution_summary.csv"
 
 
 def write_summary_csv(summary_path, rows):
@@ -258,12 +276,14 @@ for config in test_configs:
             # Setup the paths
             save_dir = os.path.join(
                 output_dir,
+                method_name(),
                 test_dataset,
                 resolution_name,
                 f"few_shot_{few_shot}",
             )
             segmentation_images_path = os.path.join(
                 visualization_output_dir,
+                method_name(),
                 test_dataset,
                 resolution_name,
                 f"few_shot_{few_shot}",
@@ -292,17 +312,35 @@ for config in test_configs:
                 "--anomaly_scorer_num_nn", "1",
                 "--patchsize", "3",
                 "--score_gamma", str(score_gamma),
-
-                "sampler",
-                "-p", "0.1", # default coreset sampling ratio (10%)
-                "approx_greedy_coreset",
-
-                "dataset",
-                "--num_workers", "0",
-                "--resize", str(resize),
-                "--imagesize", str(imagesize),
-                "--k_shot", str(few_shot) # Pass the k_shot parameter here
             ]
+
+            if enable_fastref:
+                cmd.extend(
+                    [
+                        "--fastref",
+                        "--fastref_lambda", str(fastref_lambda),
+                        "--fastref_iterations", str(fastref_iterations),
+                        "--fastref_sinkhorn_iterations",
+                        str(fastref_sinkhorn_iterations),
+                        "--fastref_epsilon", str(fastref_epsilon),
+                        "--fastref_ridge", str(fastref_ridge),
+                        "--fastref_chunk_size", str(fastref_chunk_size),
+                    ]
+                )
+
+            cmd.extend(
+                [
+                    "sampler",
+                    "-p", str(sampler_percentage),
+                    "approx_greedy_coreset",
+
+                    "dataset",
+                    "--num_workers", "0",
+                    "--resize", str(resize),
+                    "--imagesize", str(imagesize),
+                    "--k_shot", str(few_shot) # Pass the k_shot parameter here
+                ]
+            )
 
             # Subdatasets argument
             for c in classes:
@@ -337,6 +375,18 @@ for config in test_configs:
                         "resize": resize,
                         "imagesize": imagesize,
                         "score_gamma": score_gamma,
+                        "sampler_percentage": sampler_percentage,
+                        "fastref_enabled": int(enable_fastref),
+                        "fastref_lambda": fastref_lambda if enable_fastref else "",
+                        "fastref_iterations": fastref_iterations
+                        if enable_fastref
+                        else "",
+                        "fastref_sinkhorn_iterations": fastref_sinkhorn_iterations
+                        if enable_fastref
+                        else "",
+                        "fastref_epsilon": fastref_epsilon
+                        if enable_fastref
+                        else "",
                         **input_summary,
                         "segmentation_images_path": os.path.join(
                             segmentation_images_path,
