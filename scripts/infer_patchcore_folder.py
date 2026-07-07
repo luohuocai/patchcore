@@ -15,6 +15,7 @@ if SRC_ROOT not in sys.path:
     sys.path.insert(0, SRC_ROOT)
 
 import patchcore.common
+import patchcore.metrics
 import patchcore.patchcore
 import patchcore.utils
 from patchcore.datasets.image_size import channel_image_size
@@ -28,6 +29,8 @@ IMAGE_EXTENSIONS = {".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
 
 class ImageFolderDataset(torch.utils.data.Dataset):
     def __init__(self, input_path, resize, imagesize, recursive=True):
+        self.input_path = os.path.abspath(input_path)
+        self.recursive = recursive
         self.image_paths = self._collect_images(input_path, recursive)
         if not self.image_paths:
             raise ValueError("No images found in {}".format(input_path))
@@ -37,6 +40,12 @@ class ImageFolderDataset(torch.utils.data.Dataset):
                 *resize_crop_transforms(resize, imagesize),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ]
+        )
+        self.transform_mask = transforms.Compose(
+            [
+                *resize_crop_transforms(resize, imagesize),
+                transforms.ToTensor(),
             ]
         )
         self.transform_std = IMAGENET_STD
@@ -113,13 +122,13 @@ def load_patchcores(args, device):
     return patchcores
 
 
-def normalize_map(score_map):
-    score_map = np.asarray(score_map, dtype=np.float32)
-    minimum = float(np.min(score_map))
-    maximum = float(np.max(score_map))
+def normalize_segmentations(segmentations):
+    segmentations = np.asarray(segmentations, dtype=np.float32)
+    minimum = float(np.min(segmentations))
+    maximum = float(np.max(segmentations))
     if maximum <= minimum:
-        return np.zeros_like(score_map, dtype=np.float32)
-    return (score_map - minimum) / (maximum - minimum)
+        return np.zeros_like(segmentations, dtype=np.float32)
+    return (segmentations - minimum) / (maximum - minimum)
 
 
 def aggregate_predictions(patchcores, dataloader):
@@ -133,7 +142,7 @@ def aggregate_predictions(patchcores, dataloader):
         all_segmentations.append(np.asarray(segmentations, dtype=np.float32))
 
     if len(all_scores) == 1:
-        return all_scores[0], all_segmentations[0], image_paths
+        return all_scores[0], all_segmentations[0], image_paths, False
 
     normalized_scores = []
     for scores in all_scores:
@@ -159,10 +168,184 @@ def aggregate_predictions(patchcores, dataloader):
         np.mean(np.stack(normalized_scores), axis=0),
         np.mean(np.stack(normalized_segmentations), axis=0),
         image_paths,
+        True,
     )
 
 
-def save_outputs(args, dataset, image_paths, scores, segmentations):
+def _unique_extensions(first_extension):
+    extensions = []
+    for extension in [
+        first_extension,
+        ".png",
+        ".bmp",
+        ".jpg",
+        ".jpeg",
+        ".tif",
+        ".tiff",
+    ]:
+        if extension and extension not in extensions:
+            extensions.append(extension)
+    return extensions
+
+
+def _candidate_mask_paths(mask_root, input_root, image_path):
+    image_path = os.path.abspath(image_path)
+    rel_path = os.path.basename(image_path)
+    if os.path.isdir(input_root):
+        rel_path = os.path.relpath(image_path, input_root)
+
+    rel_dir = os.path.dirname(rel_path)
+    image_name = os.path.basename(image_path)
+    stem, extension = os.path.splitext(image_name)
+    directories = [os.path.join(mask_root, rel_dir), mask_root]
+    stems = [stem, "{}_mask".format(stem)]
+
+    candidates = []
+    for directory in directories:
+        for candidate_stem in stems:
+            for candidate_extension in _unique_extensions(extension.lower()):
+                candidates.append(
+                    os.path.join(directory, candidate_stem + candidate_extension)
+                )
+    return candidates
+
+
+def _mask_lookup_keys(path):
+    basename = os.path.basename(path).lower()
+    stem = os.path.splitext(basename)[0]
+    keys = {basename, stem}
+    if stem.endswith("_mask"):
+        keys.add(stem[: -len("_mask")])
+    return keys
+
+
+def _build_mask_lookup(mask_root, recursive):
+    lookup = {}
+    ambiguous = set()
+    for mask_path in ImageFolderDataset._collect_images(mask_root, recursive):
+        for key in _mask_lookup_keys(mask_path):
+            if key in lookup and lookup[key] != mask_path:
+                ambiguous.add(key)
+            lookup[key] = mask_path
+
+    for key in ambiguous:
+        lookup.pop(key, None)
+    return lookup
+
+
+def _is_good_image_path(image_path):
+    path_parts = os.path.normpath(image_path).lower().split(os.sep)
+    return "good" in path_parts
+
+
+def resolve_mask_paths(mask_input, input_path, image_paths, recursive=True):
+    mask_input = os.path.abspath(mask_input)
+    input_path = os.path.abspath(input_path)
+    if os.path.isfile(mask_input):
+        if len(image_paths) != 1:
+            raise ValueError(
+                "--mask_input points to a file, but input contains {} images.".format(
+                    len(image_paths)
+                )
+            )
+        return [mask_input]
+
+    if not os.path.isdir(mask_input):
+        raise ValueError("--mask_input does not exist: {}".format(mask_input))
+
+    lookup = _build_mask_lookup(mask_input, recursive)
+    mask_paths = []
+    missing_images = []
+    for image_path in image_paths:
+        mask_path = None
+        for candidate in _candidate_mask_paths(mask_input, input_path, image_path):
+            if os.path.exists(candidate):
+                mask_path = os.path.abspath(candidate)
+                break
+
+        if mask_path is None:
+            image_name = os.path.basename(image_path)
+            stem = os.path.splitext(image_name)[0].lower()
+            mask_path = lookup.get(image_name.lower()) or lookup.get(stem)
+
+        if mask_path is None and _is_good_image_path(image_path):
+            mask_paths.append(None)
+        elif mask_path is None:
+            missing_images.append(image_path)
+        else:
+            mask_paths.append(mask_path)
+
+    if missing_images:
+        preview = "\n".join(missing_images[:5])
+        raise ValueError(
+            "Could not find GT masks for {} image(s). First missing:\n{}".format(
+                len(missing_images), preview
+            )
+        )
+    return mask_paths
+
+
+def load_ground_truth_masks(mask_paths, dataset, target_shape):
+    masks = []
+    for mask_path in mask_paths:
+        if mask_path is None:
+            masks.append(np.zeros(target_shape, dtype=np.uint8))
+            continue
+        mask = PIL.Image.open(mask_path).convert("L")
+        mask = dataset.transform_mask(mask).numpy()
+        mask = np.squeeze(mask)
+        masks.append((mask > 0).astype(np.uint8))
+    return np.stack(masks)
+
+
+def compute_pixel_optimal_threshold(segmentations, masks_gt):
+    flat_masks = np.asarray(masks_gt).ravel()
+    if len(np.unique(flat_masks)) < 2:
+        raise ValueError(
+            "Cannot compute a pixel-optimal threshold because GT masks do not "
+            "contain both normal and anomaly pixels."
+        )
+
+    pixel_scores = patchcore.metrics.compute_pixelwise_retrieval_metrics(
+        segmentations,
+        masks_gt,
+    )
+    return float(pixel_scores["optimal_threshold"])
+
+
+def resolve_threshold_and_masks(args, dataset, image_paths, visual_segmentations):
+    mask_paths = None
+    if args.mask_input is not None:
+        mask_paths = resolve_mask_paths(
+            args.mask_input,
+            args.input,
+            image_paths,
+            recursive=not args.no_recursive,
+        )
+
+    if args.anomaly_score_threshold is not None:
+        return float(args.anomaly_score_threshold), mask_paths, "manual"
+
+    if mask_paths is None:
+        return None, None, "none"
+
+    masks_gt = load_ground_truth_masks(
+        mask_paths,
+        dataset,
+        target_shape=visual_segmentations.shape[-2:],
+    )
+    threshold = compute_pixel_optimal_threshold(visual_segmentations, masks_gt)
+    return threshold, mask_paths, "pixel_optimal_f1"
+
+
+def save_outputs(
+    args,
+    dataset,
+    image_paths,
+    scores,
+    segmentations,
+    segmentations_normalized,
+):
     os.makedirs(args.output_dir, exist_ok=True)
 
     raw_map_dir = os.path.join(args.output_dir, "score_maps")
@@ -173,7 +356,18 @@ def save_outputs(args, dataset, image_paths, scores, segmentations):
         scores,
     )
 
-    normalized_segmentations = [normalize_map(segmentation) for segmentation in segmentations]
+    visual_segmentations = (
+        np.asarray(segmentations, dtype=np.float32)
+        if segmentations_normalized
+        else normalize_segmentations(segmentations)
+    )
+    anomaly_score_threshold, mask_paths, threshold_source = resolve_threshold_and_masks(
+        args,
+        dataset,
+        image_paths,
+        visual_segmentations,
+    )
+
     if not args.skip_visualizations:
         visual_dir = os.path.join(args.output_dir, "visualizations")
 
@@ -185,18 +379,31 @@ def save_outputs(args, dataset, image_paths, scores, segmentations):
                 np.uint8
             )
 
+        def mask_transform(mask):
+            return dataset.transform_mask(mask).numpy()
+
         patchcore.utils.plot_segmentation_images(
             visual_dir,
             image_paths,
-            normalized_segmentations,
+            visual_segmentations,
             scores,
-            mask_paths=None,
+            mask_paths=mask_paths,
             image_transform=image_transform,
-            anomaly_score_threshold=args.anomaly_score_threshold,
+            mask_transform=mask_transform,
+            anomaly_score_threshold=anomaly_score_threshold,
         )
 
     print("Processed {} image(s).".format(len(image_paths)))
     print("Scores and raw score maps: {}".format(index_path))
+    if anomaly_score_threshold is None:
+        print("Anomaly contour threshold: none")
+    else:
+        print(
+            "Anomaly contour threshold: {:.6f} ({})".format(
+                anomaly_score_threshold,
+                threshold_source,
+            )
+        )
     if not args.skip_visualizations:
         print("Visualizations: {}".format(os.path.join(args.output_dir, "visualizations")))
 
@@ -216,6 +423,15 @@ def parse_args():
     parser.add_argument("--no_recursive", action="store_true")
     parser.add_argument("--skip_visualizations", action="store_true")
     parser.add_argument("--anomaly_score_threshold", type=float, default=None)
+    parser.add_argument(
+        "--mask_input",
+        default=None,
+        help=(
+            "Optional GT mask file or folder. If provided and "
+            "--anomaly_score_threshold is omitted, compute the same "
+            "pixel-optimal F1 threshold as bin/run_patchcore.py."
+        ),
+    )
     parser.add_argument("--score_gamma", type=float, default=None)
     parser.add_argument("--fastref", action="store_true", default=None)
     parser.add_argument("--fastref_lambda", type=float, default=None)
@@ -253,9 +469,18 @@ def main():
         else contextlib.suppress()
     )
     with device_context:
-        scores, segmentations, image_paths = aggregate_predictions(patchcores, dataloader)
+        scores, segmentations, image_paths, segmentations_normalized = aggregate_predictions(
+            patchcores, dataloader
+        )
 
-    save_outputs(args, dataset, image_paths, scores, segmentations)
+    save_outputs(
+        args,
+        dataset,
+        image_paths,
+        scores,
+        segmentations,
+        segmentations_normalized,
+    )
 
 
 if __name__ == "__main__":
