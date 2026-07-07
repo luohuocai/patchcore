@@ -66,6 +66,14 @@ def _summarize_inference_stats(inference_stats_per_model):
     return average_inference_time_ms, peak_gpu_memory_mb
 
 
+def _run_resolution_folder(training_imagesize, inference_imagesize):
+    training_folder = patchcore.utils.resolution_folder_name(training_imagesize)
+    inference_folder = patchcore.utils.resolution_folder_name(inference_imagesize)
+    if training_folder == inference_folder:
+        return training_folder
+    return "train_{}_infer_{}".format(training_folder, inference_folder)
+
+
 @click.group(chain=True)
 @click.argument("results_path", type=str)
 @click.option("--gpu", type=int, default=[0], multiple=True, show_default=True)
@@ -118,8 +126,9 @@ def run(
     methods = {key: item for (key, item) in methods}
 
     list_of_dataloaders = methods["get_dataloaders"](seed)
-    resolution_folder = patchcore.utils.resolution_folder_name(
-        list_of_dataloaders[0]["training"].dataset.imagesize
+    resolution_folder = _run_resolution_folder(
+        list_of_dataloaders[0]["training"].dataset.imagesize,
+        list_of_dataloaders[0]["testing"].dataset.imagesize,
     )
     run_save_path = patchcore.utils.create_storage_folder(
         results_path,
@@ -548,6 +557,34 @@ def sampler(name, percentage):
     show_default=True,
     help="Final input size. Use an int for square output or HxW, e.g. 640x1152.",
 )
+@click.option(
+    "--train_resize",
+    default=None,
+    type=str,
+    help="Training initial resize. Defaults to --resize.",
+)
+@click.option(
+    "--train_imagesize",
+    default=None,
+    type=str,
+    help="Training final input size. Defaults to --imagesize.",
+)
+@click.option(
+    "--test_resize",
+    "--inference_resize",
+    "test_resize",
+    default=None,
+    type=str,
+    help="Testing/inference initial resize. Defaults to --resize.",
+)
+@click.option(
+    "--test_imagesize",
+    "--inference_imagesize",
+    "test_imagesize",
+    default=None,
+    type=str,
+    help="Testing/inference final input size. Defaults to --imagesize.",
+)
 @click.option("--augment", is_flag=True)
 @click.option("--k_shot", default=-1, type=int, show_default=True, help="Number of few-shot normal samples to use. -1 for full dataset.")
 def dataset(
@@ -558,12 +595,20 @@ def dataset(
     batch_size,
     resize,
     imagesize,
+    train_resize,
+    train_imagesize,
+    test_resize,
+    test_imagesize,
     num_workers,
     augment,
     k_shot,
 ):
     dataset_info = _DATASETS.get(name, ["patchcore.datasets.mvtec", "MVTecDataset"])
     dataset_library = __import__(dataset_info[0], fromlist=[dataset_info[1]])
+    train_resize = train_resize or resize
+    train_imagesize = train_imagesize or imagesize
+    test_resize = test_resize or resize
+    test_imagesize = test_imagesize or imagesize
 
     def get_dataloaders(seed):
         dataloaders = []
@@ -571,9 +616,9 @@ def dataset(
             train_dataset = dataset_library.__dict__[dataset_info[1]](
                 data_path,
                 classname=subdataset,
-                resize=resize,
+                resize=train_resize,
                 train_val_split=train_val_split,
-                imagesize=imagesize,
+                imagesize=train_imagesize,
                 split=dataset_library.DatasetSplit.TRAIN,
                 seed=seed,
                 augment=augment,
@@ -583,8 +628,8 @@ def dataset(
             test_dataset = dataset_library.__dict__[dataset_info[1]](
                 data_path,
                 classname=subdataset,
-                resize=resize,
-                imagesize=imagesize,
+                resize=test_resize,
+                imagesize=test_imagesize,
                 split=dataset_library.DatasetSplit.TEST,
                 seed=seed,
             )
@@ -613,9 +658,9 @@ def dataset(
                 val_dataset = dataset_library.__dict__[dataset_info[1]](
                     data_path,
                     classname=subdataset,
-                    resize=resize,
+                    resize=train_resize,
                     train_val_split=train_val_split,
-                    imagesize=imagesize,
+                    imagesize=train_imagesize,
                     split=dataset_library.DatasetSplit.VAL,
                     seed=seed,
                 )

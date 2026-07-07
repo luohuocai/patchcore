@@ -13,21 +13,36 @@ data_root_srs = r"C:\Users\Administrator\Desktop\dataset\SRS"
 # Output directories on D drive.
 output_dir = r"D:\lhc\patchcore\fastref\csv"
 visualization_output_dir = r"D:\lhc\patchcore\fastref_epsilon0.1\visualizations"
+segmentation_maps_output_dir = r"D:\lhc\patchcore\fastref_epsilon0.1\segmentation_maps"
 # Define test configurations
 # We map the datasets as "mvtec" to reuse the MVTecDataset class structure for
 # SRS/microled/miniled as well.
 test_configs = [
     # {"dataset": "mvtec", "path": data_root_mvtec, "class_name": "bottle"},
     #
-    {"dataset": "srs", "path": data_root_srs, "class_name": "srs_squa"},
+    {"dataset": "srs", "path": data_root_srs, "class_name": "srs_cropped_processed"},
+
 ]
 
 few_shots = [5]  # Define the number of few-shots to evaluate
 
-resolutions = [
-    {"resize": "448x416", "imagesize": "448x416"},
-    # {"resize": "768x320", "imagesize": "768x320"},
-    # {"resize": "1024x448", "imagesize": "1024x448"},
+train_resolutions = {
+    "384x720": {"resize": "384x720", "imagesize": "384x720"},
+    # "768x320": {"resize": "768x320", "imagesize": "768x320"},
+    # "1024x448": {"resize": "1024x448", "imagesize": "1024x448"},
+}
+
+inference_resolutions = {
+    "384x720": {"resize": "384x720", "imagesize": "384x720"},
+    # "448x832": {"resize": "448x832", "imagesize": "448x832"},
+    # "768x320": {"resize": "768x320", "imagesize": "768x320"},
+    # "1024x448": {"resize": "1024x448", "imagesize": "1024x448"},
+}
+
+# Choose only the train/inference resolution pairs you want to run.
+resolution_pairs = [
+    ("384x720", "384x720"),
+    # ("384x720", "448x832"),
 ]
 
 # 如果是srs_line,
@@ -50,8 +65,10 @@ SUMMARY_COLUMNS = [
     "dataset",
     "class_name",
     "few_shot",
-    "resize",
-    "imagesize",
+    "train_resize",
+    "train_imagesize",
+    "inference_resize",
+    "inference_imagesize",
     "score_gamma",
     "sampler_percentage",
     "fastref_enabled",
@@ -59,10 +76,14 @@ SUMMARY_COLUMNS = [
     "fastref_iterations",
     "fastref_sinkhorn_iterations",
     "fastref_epsilon",
-    "input_height",
-    "input_width",
-    "input_pixels",
-    "input_aspect_ratio_w_h",
+    "train_input_height",
+    "train_input_width",
+    "train_input_pixels",
+    "train_input_aspect_ratio_w_h",
+    "inference_input_height",
+    "inference_input_width",
+    "inference_input_pixels",
+    "inference_input_aspect_ratio_w_h",
     "instance_auroc",
     "full_pixel_auroc",
     "anomaly_pixel_auroc",
@@ -79,6 +100,7 @@ SUMMARY_COLUMNS = [
     "peak_gpu_memory_mb",
     "num_test_images",
     "segmentation_images_path",
+    "segmentation_maps_path",
     "results_csv",
 ]
 
@@ -213,13 +235,13 @@ def parse_input_size(imagesize):
     return size, size
 
 
-def input_size_summary(imagesize):
+def input_size_summary(prefix, imagesize):
     height, width = parse_input_size(imagesize)
     return {
-        "input_height": height,
-        "input_width": width,
-        "input_pixels": height * width,
-        "input_aspect_ratio_w_h": round(width / height, 6),
+        f"{prefix}_input_height": height,
+        f"{prefix}_input_width": width,
+        f"{prefix}_input_pixels": height * width,
+        f"{prefix}_input_aspect_ratio_w_h": round(width / height, 6),
     }
 
 
@@ -227,10 +249,36 @@ def method_name():
     return "patchcore_fastref" if enable_fastref else "patchcore"
 
 
-def summary_csv_filename(resolutions):
+def selected_resolution_pairs():
+    selected_pairs = []
+    for train_key, inference_key in resolution_pairs:
+        if train_key not in train_resolutions:
+            raise RuntimeError(f"Unknown train resolution key: {train_key}")
+        if inference_key not in inference_resolutions:
+            raise RuntimeError(f"Unknown inference resolution key: {inference_key}")
+        selected_pairs.append(
+            (
+                train_key,
+                inference_key,
+                train_resolutions[train_key],
+                inference_resolutions[inference_key],
+            )
+        )
+    return selected_pairs
+
+
+def resolution_pair_name(train_resolution, inference_resolution):
+    train_name = resolution_folder_name(train_resolution["imagesize"])
+    inference_name = resolution_folder_name(inference_resolution["imagesize"])
+    if train_name == inference_name:
+        return train_name
+    return f"train_{train_name}_infer_{inference_name}"
+
+
+def summary_csv_filename(selected_pairs):
     resolution_names = []
-    for resolution in resolutions:
-        resolution_name = resolution_folder_name(resolution["imagesize"])
+    for _, _, train_resolution, inference_resolution in selected_pairs:
+        resolution_name = resolution_pair_name(train_resolution, inference_resolution)
         if resolution_name not in resolution_names:
             resolution_names.append(resolution_name)
 
@@ -250,6 +298,7 @@ def write_summary_csv(summary_path, rows):
 
 
 summary_rows = []
+selected_pairs = selected_resolution_pairs()
 
 
 for config in test_configs:
@@ -262,11 +311,16 @@ for config in test_configs:
         print(f"Error: Data root not found at {os.path.abspath(data_root)} for dataset {test_dataset}")
         continue
 
-    for resolution in resolutions:
-        resize = resolution["resize"]
-        imagesize = resolution["imagesize"]
-        resolution_name = resolution_folder_name(imagesize)
-        input_summary = input_size_summary(imagesize)
+    for _, _, train_resolution, inference_resolution in selected_pairs:
+        train_resize = train_resolution["resize"]
+        train_imagesize = train_resolution["imagesize"]
+        inference_resize = inference_resolution["resize"]
+        inference_imagesize = inference_resolution["imagesize"]
+        resolution_name = resolution_pair_name(train_resolution, inference_resolution)
+        train_input_summary = input_size_summary("train", train_imagesize)
+        inference_input_summary = input_size_summary(
+            "inference", inference_imagesize
+        )
 
         for few_shot in few_shots:
             classes = get_subdatasets(test_dataset, data_root, target_class)
@@ -288,8 +342,16 @@ for config in test_configs:
                 resolution_name,
                 f"few_shot_{few_shot}",
             )
+            segmentation_maps_path = os.path.join(
+                segmentation_maps_output_dir,
+                method_name(),
+                test_dataset,
+                resolution_name,
+                f"few_shot_{few_shot}",
+            )
             os.makedirs(save_dir, exist_ok=True)
             os.makedirs(segmentation_images_path, exist_ok=True)
+            os.makedirs(segmentation_maps_path, exist_ok=True)
 
             # Construct the command using click chaining syntax for patchcore
             cmd = [
@@ -299,6 +361,8 @@ for config in test_configs:
                 "--save_patchcore_model",
                 "--save_segmentation_images",
                 "--segmentation_images_path", segmentation_images_path,
+                "--save_segmentation_maps",
+                "--segmentation_maps_path", segmentation_maps_path,
                 "--log_project", f"few_shot_summary_{resolution_name}",
                 "--log_group", f"shot_{few_shot}",
                 save_dir,
@@ -336,8 +400,10 @@ for config in test_configs:
 
                     "dataset",
                     "--num_workers", "0",
-                    "--resize", str(resize),
-                    "--imagesize", str(imagesize),
+                    "--train_resize", str(train_resize),
+                    "--train_imagesize", str(train_imagesize),
+                    "--inference_resize", str(inference_resize),
+                    "--inference_imagesize", str(inference_imagesize),
                     "--k_shot", str(few_shot) # Pass the k_shot parameter here
                 ]
             )
@@ -359,7 +425,8 @@ for config in test_configs:
             print(
                 "Running PatchCore for "
                 f"dataset={test_dataset}, class={target_class}, "
-                f"k_shot={few_shot}, imagesize={resolution_name}..."
+                f"k_shot={few_shot}, train_imagesize={train_imagesize}, "
+                f"inference_imagesize={inference_imagesize}..."
             )
             print(f"{'='*50}\n")
 
@@ -372,8 +439,10 @@ for config in test_configs:
                         "dataset": test_dataset,
                         "class_name": target_class,
                         "few_shot": few_shot,
-                        "resize": resize,
-                        "imagesize": imagesize,
+                        "train_resize": train_resize,
+                        "train_imagesize": train_imagesize,
+                        "inference_resize": inference_resize,
+                        "inference_imagesize": inference_imagesize,
                         "score_gamma": score_gamma,
                         "sampler_percentage": sampler_percentage,
                         "fastref_enabled": int(enable_fastref),
@@ -387,9 +456,15 @@ for config in test_configs:
                         "fastref_epsilon": fastref_epsilon
                         if enable_fastref
                         else "",
-                        **input_summary,
+                        **train_input_summary,
+                        **inference_input_summary,
                         "segmentation_images_path": os.path.join(
                             segmentation_images_path,
+                            f"{patchcore_dataset_name(test_dataset)}_{target_class}",
+                            resolution_name,
+                        ),
+                        "segmentation_maps_path": os.path.join(
+                            segmentation_maps_path,
                             f"{patchcore_dataset_name(test_dataset)}_{target_class}",
                             resolution_name,
                         ),
@@ -404,6 +479,6 @@ for config in test_configs:
                 )
 
 
-summary_csv = os.path.join(output_dir, summary_csv_filename(resolutions))
+summary_csv = os.path.join(output_dir, summary_csv_filename(selected_pairs))
 write_summary_csv(summary_csv, summary_rows)
 print(f"\nSaved few-shot summary CSV to: {summary_csv}")

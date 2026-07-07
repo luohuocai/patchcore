@@ -387,7 +387,9 @@ class PatchCore(torch.nn.Module):
             patch_scores = patch_scores.reshape(batchsize, scales[0], scales[1])
             patch_scores = self._apply_score_gamma(patch_scores)
 
-            masks = self.anomaly_segmentor.convert_to_segmentation(patch_scores)
+            masks = self.anomaly_segmentor.convert_to_segmentation(
+                patch_scores, target_size=images.shape[-2:]
+            )
 
         return [score for score in image_scores], [mask for mask in masks]
 

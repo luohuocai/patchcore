@@ -114,6 +114,23 @@ def test_patchcore_on_dataloader():
         assert np.all(mask_gt.shape == (image_dimension, image_dimension))
 
 
+def test_patchcore_predict_uses_current_inference_image_size():
+    image_dimension = 112
+    inference_height = 96
+    inference_width = 80
+    model = _standard_patchcore(image_dimension)
+
+    training_dataloader = _dummy_constant_dataloader(
+        4, [3, image_dimension, image_dimension]
+    )
+    model.fit(training_dataloader)
+
+    test_features = torch.Tensor(np.ones([1, 3, inference_height, inference_width]))
+    _, masks = model.predict(test_features)
+
+    assert masks[0].shape == (inference_height, inference_width)
+
+
 def test_patchcore_load_and_saveing(tmpdir):
     image_dimension = 112
     model = _standard_patchcore(image_dimension)
